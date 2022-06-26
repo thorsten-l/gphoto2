@@ -31,6 +31,7 @@
 *.x86_64
 *.hex
 gphoto2/gphoto2
+gphoto2/gphoto2-webapi
 
 # Debug files
 *.dSYM/

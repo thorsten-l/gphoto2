@@ -1,6 +1,6 @@
 /* version.c
  *
- * Copyright © 2002 Hans Ulrich Niedermann <gp@n-dimensional.de>
+ * Copyright Â© 2002 Hans Ulrich Niedermann <gp@n-dimensional.de>
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -21,10 +21,27 @@
 #include "config.h"
 #include "version.h"
 
+#include "mongoose.h"
+
 #include <stdlib.h>
 
-#ifndef HAVE_POPT
-# error gphoto2 REQUIRES popt!
+
+#ifdef __GNUC__
+#define __unused__ __attribute__((unused))
+#else
+#define __unused__
+#endif
+
+#ifdef GPHOTO2_WEBAPI
+static const char **gphoto2_frontend_mongoose_version(GPVersionVerbosity __unused__ verbose)
+{
+	static const char *both[] = {
+		MG_VERSION,
+		"webserver lib",
+		NULL
+	};
+	return both;
+}
 #endif
 
 static const char **gphoto2_frontend_version(GPVersionVerbosity verbose)
@@ -64,6 +81,9 @@ static const char **gphoto2_frontend_version(GPVersionVerbosity verbose)
 #else
 		"no readline (for easy navigation in the shell)",
 #endif
+#ifdef GPHOTO2_WEBAPI
+		"mongoose (for gphoto2-webapi)",
+#endif
 		NULL
 	};
 	static const char *shrt[] = {
@@ -99,6 +119,9 @@ static const char **gphoto2_frontend_version(GPVersionVerbosity verbose)
 #else
 		"no readline",
 #endif
+#ifdef GPHOTO2_WEBAPI
+		"mongoose",
+#endif
 		NULL
 	};
 	return((verbose == GP_VERSION_VERBOSE)?verb:shrt);
@@ -108,6 +131,9 @@ const module_version module_versions[] = {
 	{ "gphoto2", gphoto2_frontend_version },
 	{ "libgphoto2", gp_library_version },
 	{ "libgphoto2_port", gp_port_library_version },
+#ifdef GPHOTO2_WEBAPI
+	{ "mongoose", gphoto2_frontend_mongoose_version },
+#endif
 	{ NULL, NULL }
 };
 
