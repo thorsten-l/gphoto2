@@ -22,9 +22,14 @@
 #define _XOPEN_SOURCE	/* strptime proto, but this hides other prototypes */
 #define _GNU_SOURCE	/* get all the other prototypes */
 #define __EXTENSIONS__	/* for solaris to get back strdup and strcasecmp */
+#define _DARWIN_C_SOURCE
 
 #include "config.h"
+#if defined (HAVE_SIGNAL_H)
+#include <signal.h>
+#endif
 
+#include <libgen.h>
 #include <string.h>
 #include <stdio.h>
 #ifdef HAVE_FCNTL_H
@@ -56,6 +61,11 @@
 #  include <libexif/exif-data.h>
 #endif
 
+/* only needed and present on windows */
+#ifndef O_BINARY
+# define O_BINARY 0
+#endif
+
 #define CR(result)       {int __r=(result); if (__r<0) return __r;}
 #define CRU(result,file) {int __r=(result); if (__r<0) {gp_file_unref(file);return __r;}}
 #define CL(result,list)  {int __r=(result); if (__r<0) {gp_list_free(list); return __r;}}
@@ -66,7 +76,11 @@
 #define __unused__
 #endif
 
+#ifndef GPHOTO2_WEBAPI
 static int print_widget (GPParams *p, const char*name, CameraWidget *widget);
+#else
+static int print_widget (struct mg_connection *c, GPParams *p, const char*name, CameraWidget *widget);
+#endif
 
 static long
 timediff_now (struct timeval *target) {
@@ -81,7 +95,7 @@ timediff_now (struct timeval *target) {
 int
 delete_all_action (GPParams *p)
 {
-	return (gp_camera_folder_delete_all (p->camera, p->folder, p->context));
+	return gp_camera_folder_delete_all (p->camera, p->folder, p->context);
 }
 
 int
@@ -102,12 +116,12 @@ action_camera_upload_file (GPParams *p, const char *folder, const char *path)
 	if (p->filename && strcmp (p->filename, ""))
 		fn = p->filename;
 	else
-		fn = basename (path);
+		fn = basename ((char*)path);
 
 	res = gp_camera_folder_put_file (p->camera, folder, fn, GP_FILE_TYPE_NORMAL, file,
 					 p->context);
 	gp_file_unref (file);
-	return (res);
+	return res;
 }
 
 int
@@ -123,19 +137,19 @@ action_camera_upload_metadata (GPParams *p, const char *folder, const char *path
 	res = gp_file_open (file, path);
 	if (res < 0) {
 		gp_file_unref (file);
-		return (res);
+		return res;
 	}
 
 	/* Check if the user specified a filename */
 	if (p->filename && strcmp (p->filename, "")) {
 		fn = p->filename;
 	} else if (path == strstr(path, "meta_")) {
-		fn = path+5;
+		fn = (char*)(path+5);
 	}
 	res = gp_camera_folder_put_file (p->camera, folder, fn, GP_FILE_TYPE_METADATA, file,
 					 p->context);
 	gp_file_unref (file);
-	return (res);
+	return res;
 }
 
 int
@@ -175,7 +189,7 @@ num_files_action (GPParams *p)
 		printf (_("Number of files in folder '%s': %i\n"),
 			p->folder, filecount);
 
-	return (GP_OK);
+	return GP_OK;
 }
 
 int
@@ -193,7 +207,7 @@ list_folders_action (GPParams *p)
 	CL (count = gp_list_count (list), list);
 	if (!(p->flags & FLAGS_QUIET))
 		printf(ngettext(
-			"There is %d folder in folder '%s'.\n", 
+			"There is %d folder in folder '%s'.\n",
 			"There are %d folders in folder '%s'.\n",
 			count
 		), count, p->folder);
@@ -209,7 +223,7 @@ list_folders_action (GPParams *p)
 			printf (" - %s\n", name);
 	}
 	gp_list_free (list);
-	return (GP_OK);
+	return GP_OK;
 }
 
 int
@@ -256,7 +270,7 @@ list_files_action (GPParams *p)
 		CL (print_file_action (p, p->folder, name), list);
 	}
 	gp_list_free (list);
-	return (GP_OK);
+	return GP_OK;
 }
 
 int
@@ -330,7 +344,7 @@ print_info_action (GPParams *p, const char *folder, const char *filename)
 				(info.audio.status == GP_FILE_STATUS_DOWNLOADED) ? _("yes") : _("no"));
 	}
 
-	return (GP_OK);
+	return GP_OK;
 }
 
 int
@@ -346,77 +360,105 @@ print_file_action (GPParams *p, const char *folder, const char *filename)
 		if (info.file.fields & GP_FILE_INFO_STATUS &&
 		    info.file.status == GP_FILE_STATUS_DOWNLOADED) {
 			x++;
-			return (GP_OK);
+			return GP_OK;
 		}
 	}
 
 	if (p->flags & FLAGS_QUIET)
-		printf ("%s/%s\n", folder, filename);
+        if (p->flags & FLAGS_PARSABLE) {
+            CameraFileInfo info;
+
+            printf ("FILENAME='%s/%s'", folder, filename);
+            if (gp_camera_file_get_info (p->camera, folder, filename,
+                             &info, NULL) == GP_OK) {
+                if (info.file.fields & GP_FILE_INFO_PERMISSIONS) {
+                    printf(" PERMS=%s%s",
+                           (info.file.permissions & GP_FILE_PERM_READ) ? "r" : "-",
+                           (info.file.permissions & GP_FILE_PERM_DELETE) ? "d" : "-");
+                }
+                if (info.file.fields & GP_FILE_INFO_SIZE)
+                    printf(" FILESIZE=%5ld", (unsigned long int)info.file.size);
+                if ((info.file.fields & GP_FILE_INFO_WIDTH) && +
+                    (info.file.fields & GP_FILE_INFO_HEIGHT)) {
+                    printf(" IMGWIDTH=%d", info.file.width);
+                    printf(" IMGHEIGHT=%d", info.file.height);
+                }
+                if (info.file.fields & GP_FILE_INFO_TYPE)
+                    printf(" FILETYPE=%s", info.file.type);
+                if (info.file.fields & GP_FILE_INFO_MTIME)
+                    printf(" FILEMTIME=%ld", info.file.mtime);
+                printf("\n");
+            } else
+                printf ("FILENAME='%s/%s'\n", folder, filename);
+        } else
+            printf ("%s/%s\n", folder, filename);
 	else {
 		CameraFileInfo info;
 		if (gp_camera_file_get_info (p->camera, folder, filename,
 					     &info, NULL) == GP_OK) {
 		    printf("#%-5i %-27s", x+1, filename);
 		    if (info.file.fields & GP_FILE_INFO_PERMISSIONS) {
-			printf("%s%s",
-			       (info.file.permissions & GP_FILE_PERM_READ) ? "r" : "-",
-			       (info.file.permissions & GP_FILE_PERM_DELETE) ? "d" : "-");
+                printf("%s%s",
+                       (info.file.permissions & GP_FILE_PERM_READ) ? "r" : "-",
+                       (info.file.permissions & GP_FILE_PERM_DELETE) ? "d" : "-");
 		    }
 		    if (info.file.fields & GP_FILE_INFO_SIZE)
-			printf(" %5ld KB", (unsigned long int)((info.file.size+1023) / 1024));
+                printf(" %5ld KB", (unsigned long int)((info.file.size+1023) / 1024));
 		    if ((info.file.fields & GP_FILE_INFO_WIDTH) && +
 			    (info.file.fields & GP_FILE_INFO_HEIGHT))
-			printf(" %4dx%-4d", info.file.width, info.file.height);
+                printf(" %4dx%-4d", info.file.width, info.file.height);
 		    if (info.file.fields & GP_FILE_INFO_TYPE)
-			printf(" %s", info.file.type);
+                printf(" %s", info.file.type);
+		    if (info.file.fields & GP_FILE_INFO_MTIME)
+                printf(" %ld", info.file.mtime);
 		    putchar ('\n');
 		} else
 		    printf("#%-5i %s\n", x+1, filename);
 	}
 	x++;
-	return (GP_OK);
+	return GP_OK;
 }
 
 int
 save_file_action (GPParams *p, const char *folder, const char *filename)
 {
-	return (save_file_to_file (p->camera, p->context, p->flags,
-				   folder, filename, GP_FILE_TYPE_NORMAL));
+	return save_file_to_file (p->camera, p->context, p->flags,
+				   folder, filename, GP_FILE_TYPE_NORMAL);
 }
 
 int
 save_exif_action (GPParams *p, const char *folder, const char *filename)
 {
-	return (save_file_to_file (p->camera, p->context, p->flags,
-				   folder, filename, GP_FILE_TYPE_EXIF));
+	return save_file_to_file (p->camera, p->context, p->flags,
+				   folder, filename, GP_FILE_TYPE_EXIF);
 }
 
 int
 save_meta_action (GPParams *p, const char *folder, const char *filename)
 {
-	return (save_file_to_file (p->camera, p->context, p->flags,
-				   folder, filename, GP_FILE_TYPE_METADATA));
+	return save_file_to_file (p->camera, p->context, p->flags,
+				   folder, filename, GP_FILE_TYPE_METADATA);
 }
 
 int
 save_thumbnail_action (GPParams *p, const char *folder, const char *filename)
 {
-	return (save_file_to_file (p->camera, p->context, p->flags,
-				   folder, filename, GP_FILE_TYPE_PREVIEW));
+	return save_file_to_file (p->camera, p->context, p->flags,
+				   folder, filename, GP_FILE_TYPE_PREVIEW);
 }
 
 int
 save_raw_action (GPParams *p, const char *folder, const char *filename)
 {
-	return (save_file_to_file (p->camera, p->context, p->flags,
-				   folder, filename, GP_FILE_TYPE_RAW));
+	return save_file_to_file (p->camera, p->context, p->flags,
+				   folder, filename, GP_FILE_TYPE_RAW);
 }
 
 int
 save_audio_action (GPParams *p, const char *folder, const char *filename)
 {
-	return (save_file_to_file (p->camera, p->context, p->flags,
-				   folder, filename, GP_FILE_TYPE_AUDIO));
+	return save_file_to_file (p->camera, p->context, p->flags,
+				   folder, filename, GP_FILE_TYPE_AUDIO);
 }
 
 int
@@ -425,9 +467,9 @@ save_all_audio_action (GPParams *p, const char *folder, const char *filename)
 	/* not every file has an associated audio file */
 	if (camera_file_exists(p->camera, p->context, folder, filename,
 			       GP_FILE_TYPE_AUDIO))
-		return (save_file_to_file (p->camera, p->context, p->flags,
+		return save_file_to_file (p->camera, p->context, p->flags,
 					   folder, filename,
-					   GP_FILE_TYPE_AUDIO));
+					   GP_FILE_TYPE_AUDIO);
 	return GP_OK;
 }
 
@@ -441,59 +483,74 @@ delete_file_action (GPParams *p, const char *folder, const char *filename)
 					     &info, p->context));
 		if (info.file.fields & GP_FILE_INFO_STATUS &&
 		    info.file.status == GP_FILE_STATUS_DOWNLOADED)
-			return (GP_OK);
+			return GP_OK;
 	}
-	return (gp_camera_file_delete (p->camera, folder, filename,
-				       p->context));
+	return gp_camera_file_delete (p->camera, folder, filename,
+				       p->context);
 }
 
 #ifdef HAVE_LIBEXIF
-static void
-show_ifd (ExifContent *content)
-{
-        ExifEntry *e;
-        unsigned int i;
 
-        for (i = 0; i < content->count; i++) {
-                e = content->entries[i];
-                printf ("%-20.20s", exif_tag_get_name (e->tag));
-                printf ("|");
-#ifdef HAVE_LIBEXIF_LOG
-		{char b[1024];
-		printf ("%-59.59s", exif_entry_get_value (e, b, sizeof (b)));
-		}
+#ifdef GPHOTO2_WEBAPI
+size_t strncpy_lower(char *dst, const char *src, size_t count);
+
+static void
+show_ifd(struct mg_connection *c, ExifContent *content)
 #else
-                printf ("%-59.59s", exif_entry_get_value (e));
-#endif
-                printf ("\n");
-        }
-}
-
 static void
-print_hline (void)
+show_ifd(ExifContent *content)
+#endif
 {
-        int i;
+	ExifEntry *e;
+	unsigned int i;
 
-        for (i = 0; i < 20; i++)
-                putchar ('-');
-        printf ("+");
-        for (i = 0; i < 59; i++)
-                putchar ('-');
-        putchar ('\n'); 
+	for (i = 0; i < content->count; i++)
+	{			
+		char b[1024];
+		e = content->entries[i];
+#ifndef GPHOTO2_WEBAPI
+		printf("%-20.20s", exif_tag_get_name(e->tag));
+		printf("|");
+		printf("%-59.59s", exif_entry_get_value(e, b, sizeof(b)));
+		printf("\n");
+#else
+		char bn[128];
+		strncpy_lower(bn, exif_tag_get_name(e->tag), 127 );
+    JSON_PRINTF( c, "\"%s\":\"%s\",", bn, exif_entry_get_value(e, b, sizeof(b)));
+#endif
+	}
+}
+
+#ifndef GPHOTO2_WEBAPI
+static void
+print_hline(void)
+{
+	int i;
+
+	for (i = 0; i < 20; i++)
+		putchar('-');
+	printf("+");
+	for (i = 0; i < 59; i++)
+		putchar('-');
+	putchar('\n');
 }
 #endif
+#endif
 
+#ifdef GPHOTO2_WEBAPI
+int
+print_exif_action (struct mg_connection *c, GPParams *p, const char *folder, const char *filename)
+#else
 int
 print_exif_action (GPParams *p, const char *folder, const char *filename)
+#endif
 {
 #ifdef HAVE_LIBEXIF
         CameraFile *file;
         const char *data;
         unsigned long size;
         ExifData *ed;
-#ifdef HAVE_LIBEXIF_IFD
 	unsigned int i;
-#endif
 
         CR (gp_file_new (&file));
         CRU (gp_camera_file_get (p->camera, folder, filename,
@@ -503,9 +560,10 @@ print_exif_action (GPParams *p, const char *folder, const char *filename)
         gp_file_unref (file);
         if (!ed) {
                 gp_context_error (p->context, _("Could not parse EXIF data."));
-                return (GP_ERROR);
+                return GP_ERROR;
         }
 
+#ifndef GPHOTO2_WEBAPI
         printf (_("EXIF tags:"));
         putchar ('\n');
         print_hline ();
@@ -514,36 +572,35 @@ print_exif_action (GPParams *p, const char *folder, const char *filename)
         printf ("%-59.59s", _("Value"));
         putchar ('\n');
         print_hline ();
-#ifdef HAVE_LIBEXIF_IFD
+#endif
+
 	for (i = 0; i < EXIF_IFD_COUNT; i++)
+	{
 		if (ed->ifd[i])
+		{
+#ifndef GPHOTO2_WEBAPI
 			show_ifd (ed->ifd[i]);
 #else
-        if (ed->ifd0)
-                show_ifd (ed->ifd0);
-        if (ed->ifd1)
-                show_ifd (ed->ifd1);
-        if (ed->ifd_exif)
-                show_ifd (ed->ifd_exif);
-        if (ed->ifd_gps)
-                show_ifd (ed->ifd_gps);
-        if (ed->ifd_interoperability)
-                show_ifd (ed->ifd_interoperability);
+			show_ifd (c, ed->ifd[i]);
 #endif
-        print_hline ();
-        if (ed->size) {
-                printf (_("EXIF data contains a thumbnail (%i bytes)."),
-                        ed->size);
-                putchar ('\n');
-        }
+		}
+	}
 
-        exif_data_unref (ed);
+#ifndef GPHOTO2_WEBAPI
+  print_hline ();
+  if (ed->size) {
+    printf (_("EXIF data contains a thumbnail (%i bytes)."), ed->size);
+    putchar ('\n');
+  }
+#endif
 
-        return (GP_OK);
+  exif_data_unref (ed);
+
+  return GP_OK;
 #else
 	gp_context_error (p->context, _("gphoto2 has been compiled without "
 		"EXIF support."));
-	return (GP_ERROR_NOT_SUPPORTED);
+	return GP_ERROR_NOT_SUPPORTED;
 #endif
 }
 
@@ -555,7 +612,7 @@ list_cameras_action (GPParams *p)
 
 	r = gp_abilities_list_count (gp_params_abilities_list(p));
 	if (r < 0)
-		return (r);
+		return r;
 	if (p->flags & FLAGS_QUIET)
 		printf ("%i\n", r);
 	else {
@@ -586,7 +643,7 @@ list_cameras_action (GPParams *p)
 			}
 	}
 
-	return (r);
+	return r;
 }
 
 void
@@ -640,12 +697,18 @@ list_ports_action (GPParams *p)
 		gp_port_info_get_path (info, &xpath);
 		printf ("%-32s %-32s\n", xpath, xname);
 	}
-	return (result);
+	return result;
 
 }
 
+
+#ifndef GPHOTO2_WEBAPI
 int
-auto_detect_action (GPParams *p)
+auto_detect_action(GPParams *p)
+#else
+int
+auto_detect_action(struct mg_connection *c, GPParams *p)
+#endif
 {
 	int x, count;
         CameraList *list;
@@ -655,19 +718,35 @@ auto_detect_action (GPParams *p)
 	count = gp_port_info_list_count (p->portinfo_list);
 
 	CR (gp_list_new (&list));
-        gp_abilities_list_detect (gp_params_abilities_list(p), p->portinfo_list, list, p->context);
+  gp_abilities_list_detect (gp_params_abilities_list(p), p->portinfo_list, list, p->context);
 
-        CL (count = gp_list_count (list), list);
+  CL (count = gp_list_count (list), list);
 
-        printf(_("%-30s %-16s\n"), _("Model"), _("Port"));
-        printf(_("----------------------------------------------------------\n"));
-        for (x = 0; x < count; x++) {
-                CL (gp_list_get_name  (list, x, &name), list);
-                CL (gp_list_get_value (list, x, &value), list);
-                printf(_("%-30s %-16s\n"), name, value);
-        }
+#ifdef GPHOTO2_WEBAPI
+  char *firstChar = " ";
+	JSON_PRINTF( c, "{\"result\":[", 0 );
+#else
+  printf(_("%-30s %-16s\n"), _("Model"), _("Port"));
+  printf(_("----------------------------------------------------------\n"));
+#endif
+
+  for (x = 0; x < count; x++) {
+    CL (gp_list_get_name  (list, x, &name), list);
+    CL (gp_list_get_value (list, x, &value), list);
+#ifdef GPHOTO2_WEBAPI
+		JSON_PRINTF( c, "%s{\"model\":\"%s\",\"port\":\"%s\"}\n", firstChar, name, value );
+		firstChar = ",";
+#else
+    printf(_("%-30s %-16s\n"), name, value);
+#endif
+  }
+
+#ifdef GPHOTO2_WEBAPI
+  JSON_PRINTF( c, "],\"return_code\": 0}\n" );
+#endif
+
 	gp_list_free (list);
-        return GP_OK;
+  return GP_OK;
 }
 
 int
@@ -722,13 +801,13 @@ action_camera_show_abilities (GPParams *p)
         	(a.folder_operations & GP_FOLDER_OPERATION_DELETE_ALL) ?
                 					_("yes"):_("no"));
 	printf (_("File preview (thumbnail) support : %s\n"),
-		(a.file_operations & GP_FILE_OPERATION_PREVIEW) ? 
+		(a.file_operations & GP_FILE_OPERATION_PREVIEW) ?
 							_("yes"):_("no"));
 	printf (_("File upload support              : %s\n"),
 		(a.folder_operations & GP_FOLDER_OPERATION_PUT_FILE) ?
 							_("yes"):_("no"));
 
-	return (GP_OK);
+	return GP_OK;
 }
 
 int
@@ -760,6 +839,9 @@ action_camera_set_port (GPParams *params, const char *port)
 			strncat (verified_port, port,
 				 sizeof (verified_port)
 				 	- strlen (verified_port) - 1);
+		} else {
+			gp_log (GP_LOG_ERROR, "main", "Could not guess type of port for name '%s'.", port);
+			return GP_ERROR_UNKNOWN_PORT;
 		}
 		gp_log (GP_LOG_DEBUG, "main", "Guessed port name. Using port "
 			"'%s' from now on.", verified_port);
@@ -786,19 +868,21 @@ action_camera_set_port (GPParams *params, const char *port)
 	default:
 		break;
 	}
+	if (p < GP_OK)
+		return p;
 
 	/* Get info about our port. */
 	r = gp_port_info_list_get_info (params->portinfo_list, p, &info);
 	if (r < 0)
-		return (r);
+		return r;
 
 	/* Set the port of our camera. */
 	r = gp_camera_set_port_info (params->camera, info);
 	if (r < 0)
-		return (r);
+		return r;
 	gp_port_info_get_path (info, &path);
 	gp_setting_set ("gphoto2", "port", path);
-	return (GP_OK);
+	return GP_OK;
 }
 
 int
@@ -807,11 +891,11 @@ action_camera_about (GPParams *params)
 	CameraText text;
 
 	CR (gp_camera_get_about (params->camera, &text, params->context));
-	
+
 	printf (_("About the camera driver:"));
 	printf ("\n%s\n", _(text.text));
 
-	return (GP_OK);
+	return GP_OK;
 }
 
 int
@@ -824,7 +908,7 @@ action_camera_summary (GPParams *params)
 	printf (_("Camera summary:"));
 	printf ("\n%s\n", _(text.text));
 
-	return (GP_OK);
+	return GP_OK;
 }
 
 int
@@ -837,7 +921,7 @@ action_camera_manual (GPParams *params)
 	printf (_("Camera manual:"));
 	printf ("\n%s\n", _(text.text));
 
-	return (GP_OK);
+	return GP_OK;
 }
 
 int
@@ -855,7 +939,7 @@ action_camera_set_speed (GPParams *p, unsigned int speed)
 					   "serial ports."));
 			fputc ('\n', stderr);
 		}
-		return (GP_ERROR_BAD_PARAMETERS);
+		return GP_ERROR_BAD_PARAMETERS;
 	}
 	/* Set the speed. */
 	return gp_camera_set_port_speed (p->camera, speed);
@@ -872,7 +956,7 @@ action_camera_set_model (GPParams *p, const char *model)
 	CR (gp_camera_set_abilities (p->camera, a));
 	gp_setting_set ("gphoto2", "model", a.model);
 
-	return (GP_OK);
+	return GP_OK;
 }
 
 int
@@ -899,25 +983,18 @@ int
 print_version_action (GPParams __unused__ *p)
 {
 	int n;
-	const char *port_message =
-#ifdef OS2
-			_("OS/2 port by Bart van Leeuwen\n");
-#else
-			"";
-#endif
-	printf (_("gphoto2 %s\n"
+	printf (_("%s (%s) %s\n"
 		  "\n"
-		  "Copyright (c) 2000-%d Lutz Mueller and others\n"
-		  "%s"
+		  "Copyright (c) 2000-%d Marcus Meissner and others\n"
 		  "\n"
 		  "gphoto2 comes with NO WARRANTY, to the extent permitted by law. You may\n"
 		  "redistribute copies of gphoto2 under the terms of the GNU General Public\n"
 		  "License. For more information about these matters, see the files named COPYING.\n"
 		  "\n"
-		  "This version of gphoto2 is using the following software versions and options:\n"),
-		VERSION,
-		2018, /* year of release! */
-		port_message
+		  "This version of %s is using the following software versions and options:\n"),
+		PROGNAME, PACKAGE_NAME, PACKAGE_VERSION,
+		2021, /* year of release! */
+		PROGNAME
 		);
 
 	for (n = 0; module_versions[n].name != NULL; n++) {
@@ -940,12 +1017,11 @@ print_version_action (GPParams __unused__ *p)
 	  putchar ('\n');
 	}
 
-	return (GP_OK);
+	return GP_OK;
 }
 
 static int
-_action_camera_capture_preview (GPParams *p, int viewasciiart)
-{
+_action_camera_capture_preview (GPParams *p, int viewasciiart) {
 	CameraFile *file;
 	int	r, fd;
 	char tmpname[20], *tmpfilename = NULL;
@@ -990,20 +1066,21 @@ _action_camera_capture_preview (GPParams *p, int viewasciiart)
 		gp_file_unref (file);
 		if (r < 0) {
 			unlink (tmpname);
-			return (r);
+			return r;
 		}
 	}
+
 	return GP_OK;
 }
 
 int
 action_camera_capture_preview (GPParams *p) {
-	return _action_camera_capture_preview (p, 0);
+  return _action_camera_capture_preview (p, 0);
 }
 
 int
 action_camera_show_preview (GPParams *p) {
-	return _action_camera_capture_preview (p, 1);
+  return _action_camera_capture_preview (p, 1);
 }
 
 enum moviemode { MOVIE_ENDLESS, MOVIE_FRAMES, MOVIE_SECONDS };
@@ -1012,7 +1089,7 @@ int
 action_camera_capture_movie (GPParams *p, const char *arg)
 {
 	CameraFile	*file;
-	int		r;
+	int		r, tries;
 	int		fd;
 	time_t		st;
 	enum moviemode	mm;
@@ -1024,7 +1101,7 @@ action_camera_capture_movie (GPParams *p, const char *arg)
 		fd = dup(fileno(stdout));
 		xname = "stdout";
 	} else {
-		fd = open("movie.mjpg",O_WRONLY|O_CREAT,0660);
+		fd = open("movie.mjpg",O_WRONLY|O_CREAT|O_BINARY,0660);
 		if (fd == -1) {
 			cli_error_print(_("Could not open 'movie.mjpg'."));
 			return GP_ERROR;
@@ -1048,13 +1125,20 @@ action_camera_capture_movie (GPParams *p, const char *arg)
 	}
 	CR (gp_file_new_from_fd (&file, fd));
 	gettimeofday (&starttime, NULL);
+	tries = 0;
 	while (1) {
 		const char *mime;
 		r = gp_camera_capture_preview (p->camera, file, p->context);
 		if (r < 0) {
+			if (r == GP_ERROR_CAMERA_BUSY) {
+				/* allow 20 busy tries */
+				if (tries++ < 20)
+					continue; /* just continue */
+			}
 			cli_error_print(_("Movie capture error... Exiting."));
 			break;
 		}
+		tries = 0;
 		gp_file_get_mime_type (file, &mime);
                 if (strcmp (mime, GP_MIME_JPEG)) {
 			cli_error_print(_("Movie capture error... Unhandled MIME type '%s'."), mime);
@@ -1083,7 +1167,7 @@ action_camera_capture_movie (GPParams *p, const char *arg)
 }
 
 
-/* 
+/*
  * arg can be:
  * events as number			e.g.: 1000
  * frames as number with suffix f 	e.g.: 100f
@@ -1102,6 +1186,8 @@ action_camera_wait_event (GPParams *p, enum download_type downloadtype, const ch
 	struct timeval	xtime;
 	int events, frames;
 
+        end_next = 0;
+
 	gettimeofday (&xtime, NULL);
 	memset(&last,0,sizeof(last));
 
@@ -1111,17 +1197,17 @@ action_camera_wait_event (GPParams *p, enum download_type downloadtype, const ch
 		printf ( _("Waiting for events from camera. Press Ctrl-C to abort.\n"));
 	} else {
 		int x;
-		if ((arg[strlen(arg)-1]=='f') && sscanf(arg,"%df", &x)) { /* exact nr of frames */ 
+		if ((arg[strlen(arg)-1]=='f') && sscanf(arg,"%df", &x)) { /* exact nr of frames */
 			wp.type			= WAIT_FRAMES;
 			wp.u.frames		= x;
 			printf ( _("Waiting for %d frames from the camera. Press Ctrl-C to abort.\n"), x);
 		} else
-		if ((strlen(arg)>2) && (!strcmp(&arg[strlen(arg)-2],"ms")) && sscanf(arg,"%dms",&x)) { /* exact milliseconds */ 
+		if ((strlen(arg)>2) && (!strcmp(&arg[strlen(arg)-2],"ms")) && sscanf(arg,"%dms",&x)) { /* exact milliseconds */
 			wp.type			= WAIT_TIME;
 			wp.u.milliseconds	= x;
 			printf ( _("Waiting for %d milliseconds for events from camera. Press Ctrl-C to abort.\n"), x);
 		} else
-		if ((wp.type != WAIT_TIME) && (arg[strlen(arg)-1]=='s') && sscanf(arg,"%ds", &x)) { /* exact seconds */ 
+		if ((wp.type != WAIT_TIME) && (arg[strlen(arg)-1]=='s') && sscanf(arg,"%ds", &x)) { /* exact seconds */
 			wp.type			= WAIT_TIME;
 			wp.u.milliseconds	= x*1000;
 			printf ( _("Waiting for %d seconds for events from camera. Press Ctrl-C to abort.\n"), x);
@@ -1130,7 +1216,7 @@ action_camera_wait_event (GPParams *p, enum download_type downloadtype, const ch
 			printf ( _("Waiting for %d events from camera. Press Ctrl-C to abort.\n"), wp.u.events);
 		} else {
 			wp.type = WAIT_STRING;
-			wp.u.str = arg;
+			wp.u.str = (char*)arg;
 			printf ( _("Waiting for '%s' event from camera. Press Ctrl-C to abort.\n"), wp.u.str);
 		}
 	}
@@ -1142,6 +1228,25 @@ action_camera_wait_event (GPParams *p, enum download_type downloadtype, const ch
 		int		x, exitloop;
 
 		if (glob_cancel) break;
+
+		if (capture_now) {
+			capture_now = 0;
+			data = malloc(sizeof(CameraFilePath));
+			printf(_("SIGUSR1 signal received, triggering capture!\n"));
+			ret = gp_camera_capture (p->camera, GP_CAPTURE_IMAGE, (CameraFilePath*)data, p->context);
+			if (ret == GP_OK) {
+				event = GP_EVENT_FILE_ADDED;
+				goto afterevent;
+			} else {
+				free (data);
+				data = NULL;
+			}
+		}
+		if (end_next) {
+			printf(_("SIGUSR2 signal received, stopping wait!\n"));
+			end_next = 0;
+			break;
+		}
 
 		exitloop = 0;
 		switch (wp.type) {
@@ -1168,6 +1273,7 @@ action_camera_wait_event (GPParams *p, enum download_type downloadtype, const ch
 		ret = gp_camera_wait_for_event (p->camera, leftoverms, &event, &data, p->context);
 		if (ret != GP_OK)
 			return ret;
+afterevent:
 		events++;
 		switch (event) {
 		case GP_EVENT_UNKNOWN:
@@ -1185,6 +1291,10 @@ action_camera_wait_event (GPParams *p, enum download_type downloadtype, const ch
 			break;
 		case GP_EVENT_TIMEOUT:
 			/*printf("TIMEOUT\n");*/
+			if ((wp.type == WAIT_STRING) && strstr("TIMEOUT",wp.u.str)) {
+				printf(_("event found, stopping wait!\n"));
+				return GP_OK;
+			}
 			break;
 		case GP_EVENT_CAPTURE_COMPLETE:
 			printf("CAPTURECOMPLETE\n");
@@ -1200,7 +1310,7 @@ action_camera_wait_event (GPParams *p, enum download_type downloadtype, const ch
 
 			if (	(downloadtype == DT_NO_DOWNLOAD)	||
 				(	(p->flags & FLAGS_KEEP_RAW) &&
-				 	( !strstr(fn->name,".jpg") && !strstr(fn->name,".JPG")) 
+				 	( !strstr(fn->name,".jpg") && !strstr(fn->name,".JPG"))
 				)
 			) {
 				printf("FILEADDED %s %s\n",fn->name, fn->folder);
@@ -1216,7 +1326,7 @@ action_camera_wait_event (GPParams *p, enum download_type downloadtype, const ch
 				ret = set_folder_action(p, fn->folder);
 				if (ret != GP_OK) {
 					cli_error_print(_("Could not set folder."));
-					return (ret);
+					return ret;
 				}
 			}
 			ret = get_file_common (fn->name, GP_FILE_TYPE_NORMAL);
@@ -1230,7 +1340,7 @@ action_camera_wait_event (GPParams *p, enum download_type downloadtype, const ch
 					*/
 					cli_error_print ( _("Buggy libcanon.so?"));
 				}
-				return (ret);
+				return ret;
 			}
 
 			if (!(p->flags & FLAGS_KEEP)) {
@@ -1397,7 +1507,7 @@ override_usbids_action (GPParams *p, int usb_vendor, int usb_product,
 	gp_abilities_list_free (p->_abilities_list);
 	p->_abilities_list = al;
 
-	return (GP_OK);
+	return GP_OK;
 }
 
 /* time zero for debug log time stamps */
@@ -1427,7 +1537,7 @@ debug_action (GPParams *p, const char *debug_loglevel, const char *debug_logfile
 	/* make sure we're only executed once */
 	static int debug_flag = 0;
 	if (debug_flag != 0)
-		return(GP_OK);
+		return GP_OK;
 	debug_flag = 1;
 
 	if (debug_loglevel && !strcmp(debug_loglevel, "error"))
@@ -1481,22 +1591,28 @@ debug_action (GPParams *p, const char *debug_loglevel, const char *debug_logfile
 		if (camlibs) {
 			gp_log (GP_LOG_DEBUG, "main", "CAMLIBS = '%s'", camlibs);
 		} else {
-			gp_log (GP_LOG_DEBUG, "main", 
+			gp_log (GP_LOG_DEBUG, "main",
 				"CAMLIBS env var not set, using compile-time default instead");
 		}
 		if (iolibs) {
 			gp_log (GP_LOG_DEBUG, "main", "IOLIBS = '%s'", iolibs);
 		} else {
-			gp_log (GP_LOG_DEBUG, "main", 
+			gp_log (GP_LOG_DEBUG, "main",
 				"IOLIBS env var not set, using compile-time default instead");
 		}
 	}
 
-	return (GP_OK);
+	return GP_OK;
 }
 
+#ifdef GPHOTO2_WEBAPI
 static void
-display_widgets (GPParams *p, CameraWidget *widget, char *prefix, int dumpval) {
+display_widgets (struct mg_connection *c, char **firstChar, GPParams *p, CameraWidget *widget, char *prefix, int dumpval)
+#else
+static void
+display_widgets (GPParams *p, CameraWidget *widget, char *prefix, int dumpval)
+#endif
+{
 	int 	ret, n, i;
 	char	*newprefix;
 	const char *label, *name, *uselabel;
@@ -1521,8 +1637,20 @@ display_widgets (GPParams *p, CameraWidget *widget, char *prefix, int dumpval) {
 	sprintf(newprefix,"%s/%s",prefix,uselabel);
 
 	if ((type != GP_WIDGET_WINDOW) && (type != GP_WIDGET_SECTION)) {
+#ifndef GPHOTO2_WEBAPI
 		printf("%s\n",newprefix);
 		if (dumpval) print_widget (p, newprefix, widget);
+#else
+    if (dumpval) {
+			JSON_PRINTF(c,"%s{\"path\":\"%s\"",*firstChar,newprefix);
+      print_widget (c, p, newprefix, widget);
+			JSON_PRINTF(c,"}\n");
+		}
+		else {
+      JSON_PRINTF(c,"%s\"%s\"\n",*firstChar,newprefix);
+		}
+		*firstChar = ",";
+#endif
 	}
 	for (i=0; i<n; i++) {
 		CameraWidget *child;
@@ -1530,33 +1658,73 @@ display_widgets (GPParams *p, CameraWidget *widget, char *prefix, int dumpval) {
 		ret = gp_widget_get_child (widget, i, &child);
 		if (ret != GP_OK)
 			continue;
+
+#ifdef GPHOTO2_WEBAPI
+		display_widgets (c, firstChar, p, child, newprefix, dumpval);
+#else
 		display_widgets (p, child, newprefix, dumpval);
+#endif
 	}
 	free(newprefix);
 }
 
 
+#ifndef GPHOTO2_WEBAPI
 int
-list_all_config_action (GPParams *p) {
+list_all_config_action (GPParams *p)
+#else
+int
+list_all_config_action (struct mg_connection *c, GPParams *p)
+#endif
+{
 	CameraWidget *rootconfig;
 	int	ret;
 
 	ret = gp_camera_get_config (p->camera, &rootconfig, p->context);
-	if (ret != GP_OK) return ret;
-	display_widgets (p, rootconfig, "", 1);
-	gp_widget_free (rootconfig);
-	return (GP_OK);
+
+	if (ret == GP_OK)
+	{ 
+#ifdef GPHOTO2_WEBAPI
+    char *firstChar = " ";
+	  JSON_PRINTF( c, "\"result\":[" );
+	  display_widgets (c, &firstChar, p, rootconfig, "", 1);
+	  JSON_PRINTF( c, "]," );
+#else
+	  display_widgets (p, rootconfig, "", 1);
+#endif
+	  gp_widget_free (rootconfig);
+  }
+
+	return ret;
 }
+
+#ifndef GPHOTO2_WEBAPI
 int
-list_config_action (GPParams *p) {
+list_config_action (GPParams *p)
+#else
+int
+list_config_action (struct mg_connection *c, GPParams *p)
+#endif
+{
 	CameraWidget *rootconfig;
 	int	ret;
 
 	ret = gp_camera_get_config (p->camera, &rootconfig, p->context);
-	if (ret != GP_OK) return ret;
-	display_widgets (p, rootconfig, "", 0);
-	gp_widget_free (rootconfig);
-	return (GP_OK);
+
+	if (ret == GP_OK)
+	{
+#ifdef GPHOTO2_WEBAPI
+    char *firstChar = " ";
+		JSON_PRINTF( c, "\"result\":[" );
+	  display_widgets (c, &firstChar, p, rootconfig, "", 0);
+		JSON_PRINTF( c, "]," );
+#else
+	  display_widgets (p, rootconfig, "", 0);
+#endif
+	  gp_widget_free (rootconfig);
+	}
+
+	return ret;
 }
 
 static int
@@ -1573,7 +1741,7 @@ _find_widget_by_name (GPParams *p, const char *name, CameraWidget **child, Camer
 	ret = gp_camera_get_config (p->camera, rootconfig, p->context);
 	if (ret != GP_OK) return ret;
 	ret = gp_widget_get_child_by_name (*rootconfig, name, child);
-	if (ret != GP_OK) 
+	if (ret != GP_OK)
 		ret = gp_widget_get_child_by_label (*rootconfig, name, child);
 	if (ret != GP_OK) {
 		char		*part, *s, *newname;
@@ -1631,8 +1799,14 @@ my_strftime(char *s, size_t max, const char *fmt, const struct tm *tm)
 	return strftime(s, max, fmt, tm);
 }
 
+#ifndef GPHOTO2_WEBAPI
 static int
-print_widget (GPParams *p, const char *name, CameraWidget *widget) {
+print_widget (GPParams *p, const char *name, CameraWidget *widget)
+#else
+static int
+print_widget (struct mg_connection *c, GPParams *p, const char *name, CameraWidget *widget)
+#endif
+{
 	const char *label;
 	CameraWidgetType	type;
 	int ret, readonly;
@@ -1648,16 +1822,26 @@ print_widget (GPParams *p, const char *name, CameraWidget *widget) {
 	if (ret != GP_OK)
 		return ret;
 
+#ifndef GPHOTO2_WEBAPI
 	printf ("Label: %s\n", label); /* "Label:" is not i18ned, the "label" variable is */
 	printf ("Readonly: %d\n", readonly);
+#else
+	JSON_PRINTF(c,", \"label\": \"%s\"", label); /* "Label:" is not i18ned, the "label" variable is */
+	JSON_PRINTF(c,", \"readonly\": %s", (readonly) ? "true" : "false" );
+#endif
 	switch (type) {
 	case GP_WIDGET_TEXT: {		/* char *		*/
 		char *txt;
 
 		ret = gp_widget_get_value (widget, &txt);
 		if (ret == GP_OK) {
+#ifndef GPHOTO2_WEBAPI
 			printf ("Type: TEXT\n"); /* parsed by scripts, no i18n */
 			printf ("Current: %s\n",txt);
+#else
+			JSON_PRINTF(c,", \"type\": \"TEXT\""); /* parsed by scripts, no i18n */
+			JSON_PRINTF(c,", \"current\": \"%s\"", txt);
+#endif
 		} else {
 			gp_context_error (p->context, _("Failed to retrieve value of text widget %s."), name);
 		}
@@ -1670,11 +1854,19 @@ print_widget (GPParams *p, const char *name, CameraWidget *widget) {
 		if (ret == GP_OK)
 			ret = gp_widget_get_value (widget, &f);
 		if (ret == GP_OK) {
+#ifndef GPHOTO2_WEBAPI
 			printf ("Type: RANGE\n");	/* parsed by scripts, no i18n */
 			printf ("Current: %g\n", f);	/* parsed by scripts, no i18n */
 			printf ("Bottom: %g\n", b);	/* parsed by scripts, no i18n */
 			printf ("Top: %g\n", t);	/* parsed by scripts, no i18n */
 			printf ("Step: %g\n", s);	/* parsed by scripts, no i18n */
+#else
+			JSON_PRINTF(c,", \"type\": \"RANGE\"");
+			JSON_PRINTF(c,", \"current\": %g\n", f);
+			JSON_PRINTF(c,", \"bottom\": %g\n", b);
+			JSON_PRINTF(c,", \"top\": %g\n", t);
+			JSON_PRINTF(c,", \"step\": %g\n", s);
+#endif
 		} else {
 			gp_context_error (p->context, _("Failed to retrieve values of range widget %s."), name);
 		}
@@ -1685,8 +1877,13 @@ print_widget (GPParams *p, const char *name, CameraWidget *widget) {
 
 		ret = gp_widget_get_value (widget, &t);
 		if (ret == GP_OK) {
+#ifndef GPHOTO2_WEBAPI
 			printf ("Type: TOGGLE\n");
 			printf ("Current: %d\n",t);
+#else
+			JSON_PRINTF(c,", \"type\": \"TOGGLE\"");
+			JSON_PRINTF(c,", \"current\": %d",t);
+#endif
 		} else {
 			gp_context_error (p->context, _("Failed to retrieve values of toggle widget %s."), name);
 		}
@@ -1706,10 +1903,17 @@ print_widget (GPParams *p, const char *name, CameraWidget *widget) {
 		xtime = t;
 		xtm = localtime (&xtime);
 		ret = my_strftime (timebuf, sizeof(timebuf), "%c", xtm);
+#ifndef GPHOTO2_WEBAPI
 		printf ("Type: DATE\n");
 		printf ("Current: %d\n", t);
 		printf ("Printable: %s\n", timebuf);
 		printf ("Help: %s\n", _("Use 'now' as the current time when setting.\n"));
+#else
+		JSON_PRINTF(c,", \"type\": \"DATE\"");
+		JSON_PRINTF(c,", \"current\": %d", t);
+		JSON_PRINTF(c,", \"printable\": \"%s\"", timebuf);
+		JSON_PRINTF(c,", \"help\": \"%s\"", _("Use 'now' as the current time when setting."));
+#endif
 		break;
 	}
 	case GP_WIDGET_MENU:
@@ -1721,15 +1925,38 @@ print_widget (GPParams *p, const char *name, CameraWidget *widget) {
 		if (ret == GP_OK) {
 			cnt = gp_widget_count_choices (widget);
 			if (type == GP_WIDGET_MENU)
+#ifndef GPHOTO2_WEBAPI
 				printf ("Type: MENU\n");
+#else
+				JSON_PRINTF(c,", \"type\": \"MENU\"");
+#endif
 			else
+#ifndef GPHOTO2_WEBAPI
 				printf ("Type: RADIO\n");
+#else
+				JSON_PRINTF(c,", \"type\": \"MENU\"");
+#endif
+#ifndef GPHOTO2_WEBAPI
 			printf ("Current: %s\n",current);
+#else
+			JSON_PRINTF(c,", \"current\": \"%s\"",current);
+			JSON_PRINTF(c,", \"choice\": [");
+#endif
 			for ( i=0; i<cnt; i++) {
 				const char *choice;
 				ret = gp_widget_get_choice (widget, i, &choice);
+#ifndef GPHOTO2_WEBAPI
 				printf ("Choice: %d %s\n", i, choice);
+#else
+				JSON_PRINTF(c,"%s{\"index\": %d, \"value\": \"%s\"}", (i==0) ? "" : ",", i, choice);
+#endif
 			}
+
+#ifdef GPHOTO2_WEBAPI
+			JSON_PRINTF(c,"]");
+#endif
+
+
 		} else {
 			gp_context_error (p->context, _("Failed to retrieve values of radio widget %s."), name);
 		}
@@ -1742,21 +1969,36 @@ print_widget (GPParams *p, const char *name, CameraWidget *widget) {
 	case GP_WIDGET_BUTTON:
 		break;
 	}
-	
+
+#ifndef GPHOTO2_WEBAPI
 	printf ("END\n");
+#endif
+
 	return GP_OK;
 }
 
 
+#ifndef GPHOTO2_WEBAPI
 int
-get_config_action (GPParams *p, const char *name) {
+get_config_action (GPParams *p, const char *name) 
+#else
+int 
+get_config_action (struct mg_connection *c, GPParams *p, const char *name)
+#endif
+{
 	CameraWidget *rootconfig,*child;
 	int	ret;
 
 	ret = _find_widget_by_name (p, name, &child, &rootconfig);
 	if (ret != GP_OK)
 		return ret;
+
+#ifndef GPHOTO2_WEBAPI
 	ret = print_widget (p, name, child);
+#else
+  ret = print_widget (c, p, name, child);
+#endif
+
 	gp_widget_free (rootconfig);
 	return ret;
 }
@@ -1899,7 +2141,7 @@ set_config_action (GPParams *p, const char *name, const char *value) {
 		if (i != cnt)
 			break;
 
-		/* make sure we parse just 1 integer, and there is nothing more. 
+		/* make sure we parse just 1 integer, and there is nothing more.
 		 * sscanf just does not provide this, we need strtol.
 		 */
 		i = strtol (value, &endptr, 10);
@@ -1939,7 +2181,7 @@ set_config_action (GPParams *p, const char *name, const char *value) {
 			gp_context_error (p->context, _("Failed to set new configuration value %s for configuration entry %s."), value, name);
 	}
 	gp_widget_free (rootconfig);
-	return (ret);
+	return ret;
 }
 
 int
@@ -1993,7 +2235,7 @@ set_config_index_action (GPParams *p, const char *name, const char *value) {
 	case GP_WIDGET_TOGGLE:
 	case GP_WIDGET_TEXT:
 	case GP_WIDGET_RANGE:
-	case GP_WIDGET_DATE: 
+	case GP_WIDGET_DATE:
 	case GP_WIDGET_WINDOW:
 	case GP_WIDGET_SECTION:
 	case GP_WIDGET_BUTTON:
@@ -2010,7 +2252,7 @@ set_config_index_action (GPParams *p, const char *name, const char *value) {
 			gp_context_error (p->context, _("Failed to set new configuration value %s for configuration entry %s."), value, name);
 	}
 	gp_widget_free (rootconfig);
-	return (ret);
+	return ret;
 }
 
 
@@ -2155,7 +2397,7 @@ set_config_value_action (GPParams *p, const char *name, const char *value) {
 			gp_context_error (p->context, _("Failed to set new configuration value %s for configuration entry %s."), value, name);
 	}
 	gp_widget_free (rootconfig);
-	return (ret);
+	return ret;
 }
 
 

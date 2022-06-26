@@ -96,10 +96,10 @@ static int glob_bulblength = 0;
 GPParams gp_params;
 
 /* flag for SIGUSR1 handler */
-static volatile int capture_now = 0;
+volatile int capture_now = 0;
 
 /* flag for SIGUSR2 handler */
-static volatile int end_next = 0;
+volatile int end_next = 0;
 
 /*! \brief Copy string almost like strncpy, converting to lower case.
  *

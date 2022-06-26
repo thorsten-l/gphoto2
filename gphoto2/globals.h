@@ -8,6 +8,9 @@ extern char	*glob_folder;
 extern char	glob_cwd[];
 extern int	glob_option_count;
 
+extern volatile int capture_now;
+extern volatile int end_next;
+
 #endif
 
 
